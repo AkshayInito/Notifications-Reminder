@@ -1,0 +1,86 @@
+with data as 
+(
+  select *,case when cum_strips < 15 THEN 15 - cum_strips
+                                  ELSE ceil(cum_strips/15)*15 - cum_strips END AS strips_left
+   from inito_prod_transformed_analytics.dbt_order_strips_fct
+join (select id, role_id, row_number() over(partition by id order by updated_at desc) as rnk from inito_prod_transformed_fa.dim_users) 
+on id = cycle_user_id 
+where rnk = 1 and role_id = 1
+-- limit 100
+), 
+
+order_tat as
+(
+  select cycle_user_id as uid__, city_code_shopify as cc, avg_delivery_tat_std  as delivery_tat_std, avg_delivery_tat_exp  as 
+delivery_tat_exp, 
+  from inito_prod_transformed_analytics.city_code_delivery_tat
+  join (select distinct cycle_user_id, city_code_shopify as city from data)
+  on city_code_shopify = city
+),
+
+phase as
+(
+  select * 
+  from inito_prod_transformed_analytics.dbt_phase_of_cycle 
+), 
+
+tt as 
+(
+  select distinct cycle_user_id as uid, cn as cnn, date as dd, 
+                           case when delivery_tat_exp - strips_left = 2 then 'exp' end as exp_trigger, 
+                           case when delivery_tat_std - strips_left = 2 then 'std' end as std_trigger 
+        from data 
+join order_tat 
+on cycle_user_id = uid__
+),
+
+overdue as 
+(
+  select *, date_diff(phase_date, md_exp, day) as oc_tat, delivery_tat_exp as pct_90, tat_
+
+from data 
+
+left join (select uid,cnn, min(dd) as md_std from tt where std_trigger is not null group by 1,2) 
+ on uid = cycle_user_id 
+ and cn = cnn
+
+left join (select uid as uid_,cnn as cnn_, min(dd) as md_exp from tt where exp_trigger is not null group by 1,2) 
+ on uid_ = cycle_user_id 
+ and cn = cnn_
+
+join (select * from phase where phase_of_cycle = 'OC') 
+on cycle_user_id = phase_user_id 
+and cyc_num = cn
+-- and phase_date = date 
+
+left join order_tat 
+on cycle_user_id = uid__ 
+-- and city_code_shopify = cc
+
+left join (select cycle_user_id as uu, date_diff(delivery_date, created_timestamp,day) as tat_ from data where shipping_type = 'Expedited')
+on uu = cycle_user_id
+
+-- where md_exp is not null
+where delivery_tat_exp is not null
+order by 1, date
+),
+
+jmd as 
+(
+  select distinct cycle_user_id, cn, created_timestamp, delivery_date,date_diff(delivery_date, created_timestamp, day) as actual_delivery_tat, shipping_type, md_exp, md_std, phase_date,date_diff(phase_date, md_exp, day) as trigger_oc_tat, delivery_tat_std, delivery_tat_exp, 
+-- pct_90 - oc_tat, count(distinct cycle_user_id)
+from overdue 
+where 1=1 
+and created_timestamp is not null
+and md_exp is not null
+and phase_date > md_exp
+and shipping_type = 'Standard'
+-- where oc_tat - pct_90  < 0
+-- group by 1 
+order by 1 
+) 
+
+select 
+(count(distinct case when actual_delivery_tat > trigger_oc_tat then cycle_user_id end)/27148)*100
+from jmd 
+-- where actual_delivery_tat > trigger_oc_tat
